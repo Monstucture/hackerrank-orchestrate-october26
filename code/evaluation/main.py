@@ -36,10 +36,10 @@ def score(pred, gold, verbose=False):
     failures = []
     for cid, (gstatus, gsteps) in sorted(gold.items()):
         pstatus, psteps = pred.get(cid, ("MISSING", []))
-        status_ok += pstatus == gstatus
-        seq_ok += [key(s) for s in psteps] == [key(s) for s in gsteps]
         pk = [key(s) for s in psteps]
         gk = [key(s) for s in gsteps]
+        status_ok += pstatus == gstatus
+        seq_ok += pk == gk
         remaining = list(gk)
         for k in pk:
             if k in remaining:
@@ -70,7 +70,7 @@ def score(pred, gold, verbose=False):
                 print("   missing", m)
             for e in sorted(extra):
                 print("   extra  ", e)
-    return report, failures
+    return report
 
 
 OPS = {
@@ -99,6 +99,7 @@ def check(output, requests):
         errs.append("rows not sorted by case_id")
     if sorted(ids) != want:
         errs.append(f"case ids differ from requests ({len(ids)} rows, {len(want)} requests)")
+    order = [op for ops in OPS.values() for op in ops]
     for cid, status, js in rows:
         steps = json.loads(js)
         if status not in ("COMPLETE", "INCOMPLETE", "NOT_APPLICABLE"):
@@ -112,7 +113,6 @@ def check(output, requests):
         phases = [s["phase"] for s in steps]
         if phases != sorted(phases, key=list(OPS).index):
             errs.append(f"{cid}: phases out of order")
-        order = [op for ops in OPS.values() for op in ops]
         keys = [(order.index(s["operation"]), s["system_id"], s["resource_id"])
                 for s in steps if s.get("operation") in order]
         for ph in OPS:
@@ -153,7 +153,7 @@ def main():
         sys.exit(1 if errs else 0)
     pred = Path(a.files[0]) if a.files else ROOT / "sample_predictions.csv"
     gold = Path(a.files[1]) if len(a.files) > 1 else ROOT / "dataset" / "sample_output.csv"
-    report, _ = score(load(pred), load(gold), verbose=a.verbose)
+    report = score(load(pred), load(gold), verbose=a.verbose)
     print()
     for k, v in report.items():
         print(f"{k:18} {v:.3f}" if isinstance(v, float) else f"{k:18} {v}")

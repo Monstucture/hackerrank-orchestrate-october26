@@ -20,11 +20,11 @@ All numbers come from the final code in this archive.
 | Metric | Value |
 | --- | --- |
 | Status accuracy | **1.000** (32 / 32) |
-| Step precision | **0.961** |
-| Step recall | **0.902** |
-| Step F1 | **0.930** |
-| Field-level accuracy | **0.887** |
-| Sequence accuracy | **0.469** (15 / 32 exact) |
+| Step precision | **0.978** |
+| Step recall | **0.933** |
+| Step F1 | **0.955** |
+| Field-level accuracy | **0.921** |
+| Sequence accuracy | **0.594** (19 / 32 exact) |
 
 Status confusion (gold → predicted): COMPLETE → COMPLETE 10, INCOMPLETE → INCOMPLETE 22.
 
@@ -34,7 +34,7 @@ Per phase:
 | --- | --- | --- | --- |
 | FINDING | 41 | 41 | 41 |
 | REMEDIATION | 41 | 41 | 41 |
-| VERIFICATION | 111 | 99 | 92 |
+| VERIFICATION | 111 | 102 | 98 |
 
 Findings and remediation are exact. Most lost points are in verification. The causes are listed in section 5.
 
@@ -42,7 +42,7 @@ Full dataset (518 cases): 10 `NOT_APPLICABLE`, 151 `COMPLETE`, 357 `INCOMPLETE`.
 
 ## 3. Additional evaluation cases (created by us)
 
-`code/evaluation/custom_cases.py` builds a small synthetic dataset, runs the real pipeline on it and compares each case with a hand-written answer. Result: **6 / 6 pass**.
+`code/evaluation/custom_cases.py` builds a small synthetic dataset, runs the real pipeline on it and compares each case with a hand-written answer. Result: **8 / 8 pass**.
 
 | Case | Scenario | What it tests | Expected |
 | --- | --- | --- | --- |
@@ -52,6 +52,7 @@ Full dataset (518 cases): 10 `NOT_APPLICABLE`, 151 `COMPLETE`, 357 `INCOMPLETE`.
 | case_904 | Spanish request for a copy of personal data. | The intent gate must not treat data-access requests as deletion. | `NOT_APPLICABLE`, `[]` |
 | case_905 | A backup restore check names the person only on the first line of a log trace (`subject_key`); the backup appears only on the last line. The log is captured before `audit_at`. | Joining identifiers across a trace. With the join removed, this case fails. | `INCOMPLETE`: REPORT_RESTORE_RISK citing the log, BLOCK_RESTORE, then VERIFY_RECORD_ABSENT (account) and VERIFY_RESTORE_BLOCKED |
 | case_906 | The same kind of trace, but in a log captured after `audit_at`. | The time cutoff also applies to trace links. | `COMPLETE`: only the account check, citing the earlier log |
+| case_907 / case_908 | Two cases share one batch. Their accounts appear only in readbacks with no identifier. The FAILED delete comes first in time, the SUCCESS one second; case_907 reports COMPLETE, case_908 NOT_STARTED. | Batch accounts are paired by the worker's result against the reported status, not by time order. With the status rule removed, both cases fail. | case_907 `COMPLETE`: VERIFY_RECORD_ABSENT on account_9907. case_908 `INCOMPLETE`: account_9908 still present, DELETE_RECORD, VERIFY_RECORD_ABSENT |
 
 The same script also checks **11 intent edge cases** (all pass).
 - Explicit deletions next to a side request must count as deletion: "Please delete my account. I do not need a copy of my data.", "Unsubscribe me and delete my account permanently.", "…no reason to keep my account", Spanish "borren mi cuenta".
@@ -75,11 +76,13 @@ We scored the sample after each change. Each row below is one iteration.
 | 6 | Screenshots in table form linked a row to the email on the row above. | Take the nearest identifier, preferring the line that follows the resource ID. | 0.969 | 0.898 | 0.863 |
 | 7 | Records from the same person's earlier request (months before) were reported again, e.g. a February attachment in a September case. | Drop resources whose latest evidence is more than 30 days before `requested_at`. | **0.969** | **0.908** | **0.866** |
 | 8 | Code audit: a side phrase ("copy of my data", "unsubscribe", "keep my account") overruled an explicit deletion, and Spanish "borren" was not recognised. Evidence SQL could `ATTACH` and create files. The OCR cache was keyed by file name only. A failed LLM call silently meant "not a deletion". | Three-tier intent gate (refusal / side request / deletion; unsure cases go to the LLM, offline deletion wins). SQLite attach limit set to 0. OCR cache keyed by name and size. LLM failures warn and fall back. Removed a dead SQL fallback and unused fields. Added a regression floor to the harness. | 0.969 | 0.908 | 0.866 (output unchanged) |
-| 9 | Review with the QA and PM agents. PM found the real cause of case_17: a log trace names the person with `subject_key` / `owner_key` on its first line, and the parser did not join those keys across the trace (66 such lines in 11 logs). The new refusal rule turned "delete my account, but do not delete my invoices" into NOT_APPLICABLE. The stricter `--check` then showed sample case_04 as COMPLETE with no steps: its analytics event fit its own pre-report window and the late window of three cases reported two hours earlier, so it was dropped. | Join `subject_key` / `owner_key` on `trace_id`. Refusals count only when they cover the account itself. When workflows reported at different times both fit an event, the one reported closest to it wins. A resource linked only by timing is skipped if the person already owns one of that kind through identifiers. `--check` now checks order within each phase, empty step lists and INCOMPLETE without findings. On the full set, 15 rows changed; 2 cases flipped to INCOMPLETE, both through `subject_key` traces in logs captured before `audit_at`. | **1.000** | **0.930** | **0.887** |
+| 9 | Review with the QA and PM agents. PM found the real cause of case_17: a log trace names the person with `subject_key` / `owner_key` on its first line, and the parser did not join those keys across the trace (66 such lines in 11 logs). The new refusal rule turned "delete my account, but do not delete my invoices" into NOT_APPLICABLE. The stricter `--check` then showed sample case_04 as COMPLETE with no steps: its analytics event fit its own pre-report window and the late window of three cases reported two hours earlier, so it was dropped. | Join `subject_key` / `owner_key` on `trace_id`. Refusals count only when they cover the account itself. When workflows reported at different times both fit an event, the one reported closest to it wins. A resource linked only by timing is skipped if the person already owns one of that kind through identifiers. `--check` now checks order within each phase, empty step lists and INCOMPLETE without findings. On the full set, 15 rows changed; 2 cases flipped to INCOMPLETE, both through `subject_key` traces in logs captured before `audit_at`. | 1.000 | 0.930 | 0.887 |
+| 10 | Redundancy review agent: dead fields, repeated scans, a second copy of the operation table, four CSV readers. | Removed them. `output.csv` stayed byte-identical. | 1.000 | 0.930 | 0.887 (output unchanged) |
+| 11 | PM agent: in shared batches the time-order guess swapped accounts. Case_27 (COMPLETE) got the account whose deletion FAILED, case_28 (NOT_STARTED) the one that SUCCEEDED; cases 22, 26, 31 and 32 were also wrong, and case_21 got none. For all 13 sample batch accounts, the worker's result on the profile matches the case's reported status. | A case only takes batch records whose worker result fits its `reported_status` (SUCCESS / PARTIAL / FAILED for COMPLETE / PARTIALLY_COMPLETE / NOT_STARTED). Time order is used only inside that group, or overall when the groups do not match one-to-one. The status picks the workflow; it is never taken as proof of a record's state. Two stricter variants (assign only when one case and one record share a status, with and without fallback) scored F1 0.947 and 0.943, so they were dropped. On the full set, 153 rows changed, all account or analytics records swapped or added between batch peers. No status changed. Deletion rows without an account step fell from 17 to 13. | **1.000** | **0.955** | **0.921** |
 
 ## 5. Known remaining errors (sample)
 
-1. **Accounts nobody can tell apart.** Several cases share one `reported_at`, and their deleted accounts appear only as anonymous 404 lookups or deletion events. Nothing before `audit_at` names the owner, so the agent pairs them in time order, which is a guess (cases 26–28, 31, 32). Without a guess the step would be missing anyway.
+1. **Accounts nobody can tell apart.** Several cases share one `reported_at`, and their deleted accounts appear only as anonymous 404 lookups or deletion events. The worker's result now narrows each account to the cases with the matching reported status. When several such cases share a status, nothing before `audit_at` says which is whose, and the time-order guess is wrong for cases 23, 31 and 32. Case_31's group includes case_14, whose account is linked to case_14 only by evidence captured after case_31's `audit_at`.
 2. **Retained audit records evidenced only after `audit_at`.** For 7 sample cases, the only file naming the case's security-audit record was captured after `audit_at`, or no file names it at all. The contract forbids using later evidence, so the agent leaves out these `VERIFY_RECORD_PRESENT` steps. This is the largest source of lost verification recall.
 3. **A stale account in case_17.** `account_6523` belongs to the same person's March request. It passes the 30-day filter because a worker event for another batch touched it in September. This costs one step and keeps case_17 from an exact match.
-4. **Anonymized analytics profiles in shared batches.** These carry no identifier, so with several peers they cannot be assigned (cases 21, 25, 26).
+4. **Anonymized analytics profiles in shared batches.** These carry no identifier. The status rule now assigns case_21's; with several peers of the same status, cases 25 and 26 still get none.

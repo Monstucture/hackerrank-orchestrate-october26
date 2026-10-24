@@ -24,6 +24,8 @@ USERS = [
     ["user_903", "Di Park", "di.park@example.com", "+82 10 1111 2222", "d" * 64, "2026-01-01T00:00:00Z"],
     ["user_905", "Eve Stone", "eve.stone@example.com", "+61 4 1234 5678", "e" * 64, "2026-01-01T00:00:00Z"],
     ["user_906", "Fin Gray", "fin.gray@example.com", "+49 151 2345 6789", "f" * 64, "2026-01-01T00:00:00Z"],
+    ["user_907", "Gus Hale", "gus.hale@example.com", "+33 6 12 34 56 78", "1" * 64, "2026-01-01T00:00:00Z"],
+    ["user_908", "Hana Ito", "hana.ito@example.com", "+81 90 1234 5678", "2" * 64, "2026-01-01T00:00:00Z"],
 ]
 AUDIT_LOG = [["audit_900", "user_902", "2026-05-01T00:00:00Z", "email", "cy.moss@example.com", "cy.moss.new@example.com"]]
 REQUESTS = [
@@ -45,12 +47,21 @@ REQUESTS = [
     # F: the same kind of trace, but in a log captured after audit_at: it must be ignored
     ["case_906", "fin.gray@example.com", "2026-08-01T10:00:00Z", "COMPLETE", "2026-08-02T12:00:00Z",
      "2026-08-10T12:00:00Z", "Please delete my account."],
+    # G/H: one batch, accounts named by nobody; the worker's result, not time order, says whose is whose
+    ["case_907", "gus.hale@example.com", "2026-08-10T10:00:00Z", "COMPLETE", "2026-08-12T12:00:00Z",
+     "2026-08-20T12:00:00Z", "Please delete my account."],
+    ["case_908", "hana.ito@example.com", "2026-08-10T10:00:00Z", "NOT_STARTED", "2026-08-12T12:00:00Z",
+     "2026-08-20T12:00:00Z", "Please delete my account."],
 ]
 ACTIVITY = [
     ["activity_901", "2026-08-02T11:00:00Z", "DELETE_RECORD", "deletion_worker", "account_service", "account_9901",
      "SUCCESS", "Deletion worker submitted primary profile account_9901 to account_service."],
     ["activity_902", "2026-08-02T11:01:00Z", "DELETE_RECORD", "deletion_worker", "account_service", "account_9902",
      "SUCCESS", "Deletion worker submitted primary profile account_9902 to account_service."],
+    ["activity_908", "2026-08-12T11:00:00Z", "DELETE_RECORD", "deletion_worker", "account_service", "account_9908",
+     "FAILED", "Deletion worker submitted primary profile account_9908 to account_service."],
+    ["activity_907", "2026-08-12T11:10:00Z", "DELETE_RECORD", "deletion_worker", "account_service", "account_9907",
+     "SUCCESS", "Deletion worker submitted primary profile account_9907 to account_service."],
 ]
 SQL = """-- Captured at: 2026-08-05T00:00:00Z
 BEGIN TRANSACTION;
@@ -74,6 +85,10 @@ TRACE_BEFORE = """2026-08-07T09:00:00Z level=DEBUG service=account_service trace
 """
 TRACE_AFTER = """2026-08-15T09:01:00Z level=DEBUG service=backup_service trace_id=t-8 event=restore_policy_check_started subject_key="fin.gray@example.com" attempt=1
 2026-08-15T09:01:05Z level=ERROR service=backup_service trace_id=t-8 resource_id=backup_9906 event=restore_candidate_evaluated eligible=true deletion_block=false
+"""
+# readbacks without any identifier: only the batch links these accounts to cases 907/908
+BATCH_READBACK = """2026-08-13T09:00:01Z level=INFO service=account_service trace_id=t-9 event=profile_lookup_completed resource_id=account_9907 rows=0 http_status=404
+2026-08-13T09:01:01Z level=INFO service=account_service trace_id=t-10 event=profile_lookup_completed resource_id=account_9908 rows=1 http_status=200
 """
 JSON_AFTER = {"exported_at": "2026-08-20T00:00:00Z", "records": [
     {"recorded_at": "2026-08-20T00:00:00Z", "system": "search_service", "resource_id": "search_9902",
@@ -103,6 +118,12 @@ EXPECTED = {
         ("VERIFICATION", "backup_service", "backup_9905", "VERIFY_RESTORE_BLOCKED", "BLOCKED", "")]),
     "case_906": ("COMPLETE", [
         ("VERIFICATION", "account_service", "account_9906", "VERIFY_RECORD_ABSENT", "ABSENT", "evidence_905")]),
+    "case_907": ("COMPLETE", [
+        ("VERIFICATION", "account_service", "account_9907", "VERIFY_RECORD_ABSENT", "ABSENT", "evidence_907")]),
+    "case_908": ("INCOMPLETE", [
+        ("FINDING", "account_service", "account_9908", "REPORT_REMAINING_RECORD", "PRESENT", "evidence_907"),
+        ("REMEDIATION", "account_service", "account_9908", "DELETE_RECORD", "ABSENT", ""),
+        ("VERIFICATION", "account_service", "account_9908", "VERIFY_RECORD_ABSENT", "ABSENT", "")]),
 }
 
 
@@ -132,6 +153,7 @@ def build_dataset(d):
     (ev / "records" / "tombstones.json").write_text(json.dumps(TOMBSTONE), encoding="utf-8")
     (ev / "logs" / "restore_before.log").write_text(TRACE_BEFORE, encoding="utf-8")
     (ev / "logs" / "restore_after.log").write_text(TRACE_AFTER, encoding="utf-8")
+    (ev / "logs" / "batch_readback.log").write_text(BATCH_READBACK, encoding="utf-8")
     write_csv(d / "evidence_files.csv", ["file_id", "file_path", "origin", "captured_at"], [
         ["evidence_901", "evidence/databases/failover.sql", "failover_capture", "2026-08-05T00:00:00Z"],
         ["evidence_902", "evidence/logs/lookup.log", "readback_logs", "2026-08-06T09:02:00Z"],
@@ -139,6 +161,7 @@ def build_dataset(d):
         ["evidence_904", "evidence/records/tombstones.json", "records_snapshot", "2026-08-06T00:00:00Z"],
         ["evidence_905", "evidence/logs/restore_before.log", "service_logs", "2026-08-07T10:00:00Z"],
         ["evidence_906", "evidence/logs/restore_after.log", "service_logs", "2026-08-15T10:00:00Z"],
+        ["evidence_907", "evidence/logs/batch_readback.log", "readback_logs", "2026-08-13T10:00:00Z"],
     ])
 
 

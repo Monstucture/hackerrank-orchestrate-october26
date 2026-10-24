@@ -1,27 +1,22 @@
 """Per-case audit: identity -> relevant resources -> state at audit_at -> steps."""
-import csv
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from .ids import ident_tokens, norm_phone, norm_ts, prefix, secs, system_for
+from .ids import ident_tokens, norm_phone, norm_ts, prefix, read_csv, secs, system_for
 
-PHASES = ["FINDING", "REMEDIATION", "VERIFICATION"]
 RECENT_DAYS = 30  # evidence older than this before the request is about an earlier request
-OP_ORDER = [
-    "REPORT_REMAINING_RECORD", "REPORT_EXPOSED_PII", "REPORT_ACTIVE_DATA_FLOW", "REPORT_RESTORE_RISK",
-    "DISABLE_DATA_FLOW", "BLOCK_RESTORE", "DELETE_RECORD", "REDACT_RECORD", "ANONYMIZE_RECORD",
-    "VERIFY_RECORD_ABSENT", "VERIFY_RECORD_PRESENT", "VERIFY_RECORD_REDACTED",
-    "VERIFY_RECORD_ANONYMIZED", "VERIFY_DATA_FLOW_DISABLED", "VERIFY_RESTORE_BLOCKED",
-]
-STATE = {
-    "REPORT_REMAINING_RECORD": "PRESENT", "REPORT_EXPOSED_PII": "PRESENT",
-    "REPORT_ACTIVE_DATA_FLOW": "ACTIVE", "REPORT_RESTORE_RISK": "ACTIVE",
-    "DISABLE_DATA_FLOW": "DISABLED", "BLOCK_RESTORE": "BLOCKED", "DELETE_RECORD": "ABSENT",
-    "REDACT_RECORD": "REDACTED", "ANONYMIZE_RECORD": "ANONYMIZED",
-    "VERIFY_RECORD_ABSENT": "ABSENT", "VERIFY_RECORD_PRESENT": "PRESENT",
-    "VERIFY_RECORD_REDACTED": "REDACTED", "VERIFY_RECORD_ANONYMIZED": "ANONYMIZED",
-    "VERIFY_DATA_FLOW_DISABLED": "DISABLED", "VERIFY_RESTORE_BLOCKED": "BLOCKED",
+# phase -> operation -> resulting state, in the contract's order
+OPS = {
+    "FINDING": {"REPORT_REMAINING_RECORD": "PRESENT", "REPORT_EXPOSED_PII": "PRESENT",
+                "REPORT_ACTIVE_DATA_FLOW": "ACTIVE", "REPORT_RESTORE_RISK": "ACTIVE"},
+    "REMEDIATION": {"DISABLE_DATA_FLOW": "DISABLED", "BLOCK_RESTORE": "BLOCKED", "DELETE_RECORD": "ABSENT",
+                    "REDACT_RECORD": "REDACTED", "ANONYMIZE_RECORD": "ANONYMIZED"},
+    "VERIFICATION": {"VERIFY_RECORD_ABSENT": "ABSENT", "VERIFY_RECORD_PRESENT": "PRESENT",
+                     "VERIFY_RECORD_REDACTED": "REDACTED", "VERIFY_RECORD_ANONYMIZED": "ANONYMIZED",
+                     "VERIFY_DATA_FLOW_DISABLED": "DISABLED", "VERIFY_RESTORE_BLOCKED": "BLOCKED"},
 }
+STATE = {op: st for ops in OPS.values() for op, st in ops.items()}
+OP_ORDER = list(STATE)
 CATEGORY_BY_PREFIX = {
     "account": "USER_PROFILE", "search": "SEARCH_INDEX_ENTRY", "analytics": "ANALYTICS_PROFILE",
     "support": "SUPPORT_MESSAGE", "export": "USER_EXPORT", "object": "SUPPORT_ATTACHMENT",
@@ -49,6 +44,8 @@ def fits_batch(activity, offset, tier):
     return -700 <= offset <= 700 if is_account else -300 < offset < 2200
 
 
+# a workflow's reported status follows the worker's result on the records it treated
+STATUS_RESULT = {"COMPLETE": "SUCCESS", "PARTIALLY_COMPLETE": "PARTIAL", "NOT_STARTED": "FAILED"}
 WORKER_EVENTS = {"DELETE_RECORD", "ANONYMIZE_RECORD", "REDACT_RECORD", "DISABLE_DATA_FLOW",
                  "BLOCK_RESTORE", "CHECK_DATA_FLOW", "CHECK_RESTORE_ACCESS"}
 
@@ -57,11 +54,10 @@ class World:
     """All participant data, indexed once."""
 
     def __init__(self, dataset, obs, scopes, activities):
-        self.rules = {r["data_category"]: r["required_action"]
-                      for r in csv.DictReader(open(dataset / "deletion_rules.csv", encoding="utf-8"))}
-        self.users = {r["user_id"]: r for r in csv.DictReader(open(dataset / "user_identities.csv", encoding="utf-8"))}
+        self.rules = {r["data_category"]: r["required_action"] for r in read_csv(dataset / "deletion_rules.csv")}
+        self.users = {r["user_id"]: r for r in read_csv(dataset / "user_identities.csv")}
         self.history = defaultdict(list)
-        for r in csv.DictReader(open(dataset / "user_audit_log.csv", encoding="utf-8")):
+        for r in read_csv(dataset / "user_audit_log.csv"):
             self.history[r["user_id"]].append(r)
         self.obs_by_rid = defaultdict(list)
         for o in obs:
@@ -72,7 +68,7 @@ class World:
                 active = ("remains enabled" in d or "can still be restored" in d)
                 self.obs_by_rid[a["resource_id"]].append({
                     "file_id": a["activity_id"], "ts": norm_ts(a["event_time"]), "avail": norm_ts(a["event_time"]),
-                    "rid": a["resource_id"], "system": a["target_system"], "present": True,
+                    "rid": a["resource_id"], "present": True,
                     "pii": set(), "refs": set(), "attrs": {"active": active}, "kind": "activity"})
         self.scopes_by_system = defaultdict(list)
         for s in scopes:
@@ -140,8 +136,7 @@ class World:
                 o["present"] and o["kind"] == "direct" and t < o["ts"] for o in out) for t in worked)
             if about_person or confirmed:
                 out.append({"file_id": s["file_id"], "ts": s["ts"], "avail": s["avail"], "rid": rid,
-                            "system": system_for(rid), "present": False, "pii": set(), "refs": set(),
-                            "attrs": {}, "kind": "scope"})
+                            "present": False, "pii": set(), "refs": set(), "attrs": {}, "kind": "scope"})
         return out
 
     def owners(self, rid, cutoff):
@@ -160,7 +155,6 @@ class World:
 class Auditor:
     def __init__(self, world, cases):
         self.w = world
-        self.cases = cases  # all deletion-authorized cases, for batch disambiguation
         self.by_reported = defaultdict(list)
         for c in cases:
             self.by_reported[c["reported_at"]].append(c)
@@ -243,8 +237,11 @@ class Auditor:
     def resolve_ambiguous(self, case, pfx, cands, cutoff):
         """Several cases share a batch and the resource names nobody.
 
-        Peers that already own a resource of this kind drop out; if the rest
-        match the candidates one-to-one they are paired in time order.
+        Peers that already own a resource of this kind drop out. A peer takes
+        only candidates whose worker result fits its reported status (the
+        status picks the workflow, it never proves a record's state); within
+        that group, or overall if the groups do not match one-to-one, peers
+        and candidates are paired in time order.
         """
         peers = sorted(self.by_reported.get(case["reported_at"], []), key=lambda c: c["case_id"])
         needy = []
@@ -254,6 +251,12 @@ class Auditor:
             if not any(prefix(r) == pfx for r in owned | named | timed):
                 needy.append(p)
         cands = sorted(cands, key=lambda r: self.first_touch[r])
+        want = STATUS_RESULT.get(case["reported_status"])
+        group = [p for p in needy if p["reported_status"] == case["reported_status"]]
+        fitting = [r for r in cands if any(a["reported_result"] == want for a in self.w.worker_by_rid[r]
+                                           if not a["event_type"].startswith("CHECK_"))]
+        if case in group and len(group) == len(fitting):
+            return {fitting[group.index(case)]}
         if case not in needy or len(needy) != len(cands):
             return set()
         return {cands[needy.index(case)]}
@@ -309,7 +312,7 @@ class Auditor:
                         default="")]
             if same:
                 cite = max(same)[1]
-        merged = {"file_id": cite, "ts": key[0], "present": present,
+        merged = {"file_id": cite, "present": present,
                   "pii": set().union(*(o["pii"] for o in g)), "attrs": {}}
         for o in g:
             for k, v in o["attrs"].items():
@@ -319,7 +322,7 @@ class Auditor:
                     merged["attrs"].setdefault(k, v)
         return merged
 
-    def plan_resource(self, rid, obs, keys):
+    def plan_resource(self, rid, obs):
         """Return (finding, remediation, verification) ops for one resource."""
         cat = self.category(rid, obs)
         s = self.latest(obs)
@@ -362,7 +365,7 @@ class Auditor:
             obs = self.w.observations(rid, cutoff, keys)
             if not obs:
                 continue
-            (find, fix, verify), s = self.plan_resource(rid, obs, keys)
+            (find, fix, verify), s = self.plan_resource(rid, obs)
             sysname = system_for(rid)
             if find:
                 rows.append(("FINDING", find, sysname, rid, s["file_id"]))
@@ -372,7 +375,7 @@ class Auditor:
         complete = not any(r[0] == "FINDING" for r in rows)
         if not complete:
             rows = [r if r[0] == "FINDING" else (r[0], r[1], r[2], r[3], "") for r in rows]
-        rows.sort(key=lambda r: (PHASES.index(r[0]), OP_ORDER.index(r[1]), r[2], r[3]))
+        rows.sort(key=lambda r: (OP_ORDER.index(r[1]), r[2], r[3]))  # OP_ORDER lists phases in order
         steps = [{"step_no": i + 1, "phase": p, "system_id": sy, "resource_id": rid,
                   "operation": op, "state": STATE[op], "evidence_id": ev}
                  for i, (p, op, sy, rid, ev) in enumerate(rows)]

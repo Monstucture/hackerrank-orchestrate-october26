@@ -69,7 +69,7 @@ python code/main.py --out /path/to/my_output.csv
 | `python code/evaluation/main.py` | Scores `sample_predictions.csv` against `dataset/sample_output.csv`. | Prints status accuracy, step precision, recall and F1, field accuracy and sequence accuracy. |
 | `python code/evaluation/main.py --min-status 1.0 --min-f1 0.92` | The same score, but exits with code 1 if status accuracy or step F1 drops below the floor. Use it after any rule change. | No `REGRESSION:` line, exit code 0 |
 | `python code/evaluation/main.py --verbose` | The same score, plus the missing and extra steps for each case that differs. | Used for debugging. |
-| `python code/evaluation/custom_cases.py` | Builds 6 synthetic cases in a temporary folder, runs the real pipeline on them, and runs 11 intent edge cases. | `6/6 custom cases passed` and `11/11 intent cases passed` |
+| `python code/evaluation/custom_cases.py` | Builds 8 synthetic cases in a temporary folder, runs the real pipeline on them, and runs 11 intent edge cases. | `8/8 custom cases passed` and `11/11 intent cases passed` |
 
 Run `--sample` before scoring: the scorer reads the `sample_predictions.csv` that the sample run writes.
 
@@ -80,7 +80,7 @@ python code/evaluation/main.py PREDICTIONS.csv GOLD.csv
 python code/evaluation/main.py --check OUTPUT.csv REQUESTS.csv
 ```
 
-Current sample scores: status 1.000, step F1 0.930, field 0.887, sequence 15/32. The full numbers are in `code/evaluation/evaluation_report.md`.
+Current sample scores: status 1.000, step F1 0.955, field 0.921, sequence 19/32. The full numbers are in `code/evaluation/evaluation_report.md`.
 
 ## 5. OCR cache
 

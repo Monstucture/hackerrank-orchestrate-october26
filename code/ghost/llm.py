@@ -21,10 +21,6 @@ class LLM:
         self.calls = self.input_tokens = self.output_tokens = 0
         self.cache = {}
 
-    @classmethod
-    def from_env(cls):
-        return cls(os.environ.get("ANTHROPIC_API_KEY"))
-
     def classify_intent(self, text):
         if not self.key:
             return None

@@ -1,19 +1,18 @@
 """Turn every evidence file into a flat list of observations.
 
-An observation says: at time `ts`, file `file_id` saw resource `rid` in
-system `system`, it was present / absent, these identifiers were visible in
+An observation says: at time `ts`, file `file_id` saw resource `rid`,
+it was present / absent, these identifiers were visible in
 it (`pii`), these keys link it to a person (`refs`), plus raw attributes.
 
 Snapshot-style files also emit "scope" facts: the file captured the whole
 collection of a system at a time, so a resource missing from it was absent.
 """
-import csv
 import json
 import re
 import sqlite3
 from pathlib import Path
 
-from .ids import (USER_RE, RID_RE, norm_ts, ident_tokens, prefix, system_for)
+from .ids import (USER_RE, RID_RE, norm_ts, ident_tokens, prefix, read_csv, system_for)
 
 # Fields whose values are direct identifiers stored inside the record.
 PII_FIELDS = {
@@ -37,9 +36,8 @@ def _val(v):
     return None if v in NULLS else v
 
 
-def new_obs(file_id, ts, rid, system=None):
-    return {"file_id": file_id, "ts": ts, "rid": rid, "system": system or system_for(rid),
-            "present": None, "pii": set(), "refs": set(), "attrs": {}, "kind": "direct"}
+def new_obs(file_id, ts, rid):
+    return {"file_id": file_id, "ts": ts, "rid": rid, "present": None, "pii": set(), "refs": set(), "attrs": {}, "kind": "direct"}
 
 
 def fill_from_fields(obs, rec):
@@ -102,7 +100,7 @@ def apply_status(obs):
         obs["attrs"]["identifiable"] = str(a["direct_identifiers"]) != "0"
     if str(a.get("marker_found", "")).lower() == "false":
         obs["present"] = True
-    if obs["present"] is None and obs["kind"] == "direct":
+    if obs["present"] is None:
         obs["present"] = True
 
 
@@ -126,7 +124,7 @@ def parse_json(file_id, captured, data):
                 c["ts"] = norm_ts(node["captured_at"])
             if "records" in node and "data_store" in node:
                 scopes.append({"file_id": file_id, "ts": c.get("ts", top_ts),
-                               "system": node["data_store"], "kind": "scope",
+                               "system": node["data_store"],
                                "rids": {r.get("resource_id") for r in node["records"]
                                         if isinstance(r, dict)}})
             for k, v in node.items():
@@ -141,8 +139,7 @@ def parse_json(file_id, captured, data):
                                 if isinstance(r, dict):
                                     rids.add(r.get("resource_id"))
                                 walk(r, sc2)
-                        scopes.append({"file_id": file_id, "ts": top_ts, "system": sysname,
-                                       "kind": "scope", "rids": rids})
+                        scopes.append({"file_id": file_id, "ts": top_ts, "system": sysname, "rids": rids})
                     continue
                 walk(v, cc)
         elif isinstance(node, list):
@@ -156,16 +153,12 @@ def parse_json(file_id, captured, data):
             if rec.get(f):
                 ts = norm_ts(rec[f])
                 break
-        ts = ts or ctx.get("ts") or top_ts
-        sysname = rec.get("system") or system_for(rid)
-        o = new_obs(file_id, ts, rid, sysname)
+        o = new_obs(file_id, ts or ctx.get("ts") or top_ts, rid)
         o["attrs"]["collection"] = ctx.get("collection")
         flat = {}
         for k, v in rec.items():
             if isinstance(v, dict):
-                if k == "profile":
-                    flat.update(v)
-                elif k == "document":
+                if k in ("profile", "document"):
                     flat.update(v)
                 elif k == "hits":
                     docs = v.get("documents") or []
@@ -176,12 +169,8 @@ def parse_json(file_id, captured, data):
                 flat[k] = v
         if "profile" in rec and rec["profile"] is None and "status_code" not in rec:
             o["present"] = False
-        if rec.get("record_type"):
-            o["attrs"]["record_type"] = rec["record_type"]
         # record_lookup style rows carry the person in subject_reference/lookup_value
         fill_from_fields(o, flat)
-        if "message_text" in flat and _val(flat["message_text"]):
-            o["pii"] |= ident_tokens(flat["message_text"])
         apply_status(o)
         out.append(o)
 
@@ -224,9 +213,8 @@ def parse_sql(file_id, captured, text):
                 continue
             sysname = sysname or system_for(rid)
             ts = norm_ts(rec.get("updated_at") or rec.get("indexed_at")) or file_ts
-            o = new_obs(file_id, max(ts, file_ts) if ts else file_ts, rid, sysname)
+            o = new_obs(file_id, max(ts, file_ts) if ts else file_ts, rid)
             o["attrs"]["collection"] = coll
-            o["attrs"]["table"] = t
             flat = {}
             for k, v in rec.items():
                 if isinstance(v, dict) and k in ("document", "profile"):
@@ -234,19 +222,16 @@ def parse_sql(file_id, captured, text):
                 elif k != "resource_id":
                     flat[k] = v
             fill_from_fields(o, flat)
-            if _val(rec.get("message_text")):
-                o["pii"] |= ident_tokens(rec["message_text"])
             apply_status(o)
             o["present"] = True
             out.append(o)
             seen_by_system.setdefault(sysname, set()).add(rid)
     for sysname, rids in seen_by_system.items():
         scopes.append({"file_id": file_id, "ts": scope_ts.get(sysname, file_ts),
-                       "system": sysname, "kind": "scope", "rids": rids})
+                       "system": sysname, "rids": rids})
     for sysname, ts in scope_ts.items():
         if sysname not in seen_by_system:
-            scopes.append({"file_id": file_id, "ts": ts, "system": sysname,
-                           "kind": "scope", "rids": set()})
+            scopes.append({"file_id": file_id, "ts": ts, "system": sysname, "rids": set()})
     con.close()
     return out, scopes
 
@@ -306,9 +291,7 @@ def parse_log(file_id, captured, text):
         rid = kv.get("resource_id")
         if not rid or not RID_RE.fullmatch(rid):
             continue
-        o = new_obs(file_id, ln["ts"], rid, kv.get("system") or system_for(rid))
-        o["attrs"]["event"] = ln["event"]
-        o["attrs"]["service"] = ln["service"]
+        o = new_obs(file_id, ln["ts"], rid)
         flat = {k: v for k, v in kv.items() if k not in ("resource_id", "service", "event")}
         fill_from_fields(o, flat)
         for key in keys_by_trace.get(ln["trace"], ()):
@@ -316,13 +299,8 @@ def parse_log(file_id, captured, text):
         ev = ln["event"] or ""
         if ev.endswith("_started") or ev in ("connection_acquired", "cache_lookup"):
             continue
-        if ev in ("message_read",) and _val(kv.get("message_text")):
-            o["pii"] |= ident_tokens(kv["message_text"])
         if "attachment" in ev or kv.get("file", "").endswith(".pdf"):
             o["attrs"]["attachment"] = True
-        if "result" in kv and kv["result"] == "hit":
-            o["present"] = True
-            kv2 = dict(o["attrs"]); kv2.pop("result", None); o["attrs"] = kv2
         apply_status(o)
         if ev.endswith("pii_scan") or ev == "analytics_identity_scan":
             o["attrs"]["identifiable"] = True
@@ -338,8 +316,8 @@ def parse_text(file_id, captured, text):
     for line in text.splitlines():
         parts = [p.strip() for p in line.lstrip("- ").split("|")]
         if len(parts) == 6 and RID_RE.fullmatch(parts[2]):
-            ts, system, rid, rtype, status, value = parts
-            o = new_obs(file_id, norm_ts(ts) or captured, rid, system)
+            ts, _, rid, rtype, status, value = parts
+            o = new_obs(file_id, norm_ts(ts) or captured, rid)
             o["attrs"].update(record_type=rtype, result=status)
             o["refs"] |= ident_tokens(value)
             if status == "IDENTIFIABLE":
@@ -362,7 +340,8 @@ def parse_free_text(file_id, captured, text, aliases):
     identifiers printed within a few lines of it.
     """
     lines = [l for l in text.replace("·", " ").replace("_oo", "_00").splitlines() if l.strip()]
-    toks = ident_tokens(NL.join(lines))
+    text = NL.join(lines)
+    toks = ident_tokens(text)
     emails = {t for t in toks if "@" in t}
     users = {t for t in toks if t.startswith("user_")}
     single = len(emails) <= 1 and len(users) <= 1
@@ -399,7 +378,6 @@ def parse_free_text(file_id, captured, text, aliases):
             # a connector or archive shown live on an operations screen is running / restorable
             o["attrs"]["active"] = True
         out.append(o)
-    text = NL.join(lines)
     # rows like "ORD-20264118 | user_08 | ..." in registers
     for m in re.finditer(r"(ORD-\d+)\s*\|\s*(user_\d+)\s*\|([^\n]*)", text):
         order, uid, rest = m.groups()
@@ -408,7 +386,6 @@ def parse_free_text(file_id, captured, text, aliases):
             o = new_obs(file_id, captured, rid)
             o["refs"] = {uid}
             o["present"] = True
-            o["attrs"]["retain_note"] = rest.strip()
             out.append(o)
     return out
 
@@ -433,7 +410,7 @@ def pdf_text(path):
 # ---------------------------------------------------------------- driver
 
 def load_evidence(dataset: Path, activities, ocr_cache_path: Path):
-    manifest = list(csv.DictReader(open(dataset / "evidence_files.csv", encoding="utf-8")))
+    manifest = read_csv(dataset / "evidence_files.csv")
     obs, scopes = [], []
     link_aliases, record_aliases = {}, {}
     for a in activities:  # "linked object_19 (delivery_confirmation_19.pdf) to ..."

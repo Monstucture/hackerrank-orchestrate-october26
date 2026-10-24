@@ -6,6 +6,7 @@
 import argparse
 import csv
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -15,13 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ghost.audit import Auditor, World  # noqa: E402
 from ghost.evidence import load_evidence  # noqa: E402
+from ghost.ids import read_csv  # noqa: E402
 from ghost.intent import authorizes_deletion  # noqa: E402
 from ghost.llm import LLM  # noqa: E402
-
-
-def read_csv(path):
-    with open(path, encoding="utf-8", newline="") as f:
-        return list(csv.DictReader(f))
 
 
 def build(dataset, llm):
@@ -36,7 +33,7 @@ def build(dataset, llm):
 
 def run(requests_file, out_file, dataset=ROOT / "dataset"):
     t0 = time.time()
-    llm = LLM.from_env()
+    llm = LLM(os.environ.get("ANTHROPIC_API_KEY"))
     auditor, known = build(dataset, llm)
     rows = []
     for req in read_csv(dataset / requests_file):

@@ -1,4 +1,5 @@
-"""Identifier normalisation shared by every module."""
+"""Identifier normalisation and CSV loading shared by every module."""
+import csv
 import re
 from datetime import datetime, timezone
 
@@ -20,6 +21,11 @@ SYSTEM_BY_PREFIX = {
     "email_delivery": "email_delivery_service", "object": "object_storage",
     "telemetry": "telemetry_service",
 }
+
+
+def read_csv(path):
+    with open(path, encoding="utf-8", newline="") as f:
+        return list(csv.DictReader(f))
 
 
 def prefix(rid):
