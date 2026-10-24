@@ -1,0 +1,3 @@
+pypdf>=4.0
+# Only needed when code/cache/ocr_text.json is missing or a new screenshot is added.
+rapidocr-onnxruntime>=1.3

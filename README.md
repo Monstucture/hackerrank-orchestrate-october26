@@ -12,6 +12,41 @@ Read [`problem_statement.md`](./problem_statement.md) for the complete challenge
 
 ---
 
+## Our Solution: the deletion-audit agent
+
+### Setup and run
+
+Python 3.11+ (tested on 3.12). From the repository root:
+
+```bash
+pip install -r code/requirements.txt
+python code/main.py                      # 518 requests -> output.csv (repo root)
+python code/main.py --sample             # 32 sample requests -> sample_predictions.csv
+python code/evaluation/main.py --min-status 1.0 --min-f1 0.92   # score samples; fails on a regression
+python code/evaluation/main.py --check   # validate output.csv against the output contract
+python code/evaluation/custom_cases.py   # hand-built evaluation cases and intent edge cases
+```
+
+The step-by-step guide, with virtual-environment setup, every option, packaging and troubleshooting, is in [`code/RUNNING.md`](./code/RUNNING.md).
+
+A full run takes about 5 seconds. No API key is needed: the agent is deterministic. OCR text of the screenshots is cached in `code/cache/ocr_text.json`; delete that file to re-run local OCR (`rapidocr-onnxruntime`). If `ANTHROPIC_API_KEY` is set, the intent gate asks a Claude model about any request text its keyword rules cannot decide. On this dataset the rules decide every request, so the LLM is never called.
+
+### How it works
+
+| Stage | Module | What it does |
+| --- | --- | --- |
+| Intent gate | `code/ghost/intent.py` | Multilingual keyword rules decide whether the text authorizes deletion. Explicit refusals ("do not close", "marketing lists only") and access, export, correction or login requests with no deletion word become `NOT_APPLICABLE`. When a deletion word sits next to a side request, the gate is unsure: an LLM decides if configured, otherwise deletion wins. |
+| Evidence extraction | `code/ghost/evidence.py` | Parses every manifest file into flat observations: JSON exports and snapshot bundles, SQLite snapshots (primary and replica tables, run in an in-memory DB), five log dialects (lookup and subject keys joined across `trace_id`), text handovers, PDFs (`pypdf`) and screenshots (OCR). Snapshots also record which resources they contain, so a missing record can prove absence. |
+| Identity | `code/ghost/audit.py` `World` | Resolves the request email (current or historical) to a `user_id`. Collects current and historical emails, phones and hashes that were known at `audit_at`. |
+| Relevance | `Auditor.relevant` | A resource belongs to the case if, at or before `audit_at`, evidence links it to one of the person's identifiers, a data-catalog link names them, or the deletion worker touched it in this case's batch. Batch timing windows are relative to `reported_at`; resources that fit several cases with the same `reported_at` are paired in time order. If workflows reported at different times both fit, the one reported closest to the event wins. Timing never adds a second record of a kind the person already owns through their identifiers. Records last seen more than 30 days before the request belong to an earlier request and are dropped. |
+| State at `audit_at` | `Auditor.latest` | Takes the newest observation available at `audit_at`. Workflow results are never trusted; deletion-worker check events count as observations. A snapshot's silence proves absence only if the snapshot is about this person, or if it confirms an attempted deletion and no later sighting contradicts it. |
+| Policy | `Auditor.plan_resource` | Applies `deletion_rules.csv` per category: delete, redact, anonymize, retain, tombstone redaction, disable active flows, block restorable backups. The worker's planned operation decides between deleting and redacting a support record. |
+| Steps | `Auditor.audit` | Builds findings, remediation and verification steps. Sorted by phase, then operation order, then `system_id`, then `resource_id`. Findings and `COMPLETE` checks cite the proving `file_id` / `activity_id`; future work uses `""`. |
+
+Only participant files under `dataset/` are read, and no case IDs or labels are hard-coded. `dataset/sample_output.csv` is used only by the evaluation harness. Results are in `code/evaluation/evaluation_report.md` and `code/evaluation/usage_report.md`.
+
+---
+
 ## Quick Start
 
 Clone the repository and move into the project directory:
